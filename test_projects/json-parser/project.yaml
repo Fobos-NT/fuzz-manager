@@ -1,0 +1,7 @@
+language: c
+sanitizers:
+  - address
+  - memory:
+     experimental: True
+  - undefined
+fuzzing_engines: sydr-fuzz

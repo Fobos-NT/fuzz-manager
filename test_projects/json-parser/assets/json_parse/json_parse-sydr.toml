@@ -1,0 +1,24 @@
+out = "$FUZZER_OUT"
+
+[sydr]
+args = "-l debug"
+target = "/out/sydr-fuzz_none_build/json_parse @@"
+jobs = 2
+
+[aflplusplus]
+path = "/out/afl_none_build/"
+target = "/out/afl_none_build/json_parse -"
+args = "-x /out/afl_none_build/json_parse.dict -i /out/afl_none_build/json_parse_seed_corpus"
+jobs = 6
+cmin = false
+[aflplusplus.env]
+    ASAN_OPTIONS = "symbolize=0"
+    MSAN_OPTIONS = "exit_code=86,symbolize=0"
+
+
+[libfuzzer]
+path = "/out/libfuzzer_address_build/json_parse"
+args = "-dict=/out/libfuzzer_address_build/json_parse.dict -jobs=2 /out/libfuzzer_address_build/json_parse_seed_corpus"
+path = "/out/libfuzzer_address_build/json_parse"
+args = "-dict=/out/libfuzzer_address_build/json_parse.dict -jobs=2 /out/libfuzzer_address_build/json_parse_seed_corpus"
+cmin = false

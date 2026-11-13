@@ -1,0 +1,98 @@
+#!/bin/bash -eu
+# Copyright 2019 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+echo "Precompiling honggfuzz"
+export BUILD_OSSFUZZ_STATIC=true
+
+PACKAGES=(
+    libunwind8-dev
+    libblocksruntime-dev
+    liblzma-dev
+    libiberty-dev
+    zlib1g-dev
+    pkg-config)
+
+if [ -f /etc/altlinux-release ]; then
+  PACKAGES=(libunwind-devel liblzma-devel
+            liblzma-devel-static binutils-devel zlib-devel zlib-devel-static
+            pkg-config)
+fi
+apt-get update && apt-get install -y ${PACKAGES[@]}
+
+if [ -f /etc/altlinux-release ]; then
+  # ALT's libunwind-devel only provides shared libraries. honggfuzz is copied
+  # into the runner, so retain BUILD_OSSFUZZ_STATIC and build the archives.
+  LIBUNWIND_VERSION=1.8.1
+  LIBUNWIND_BUILD_DIR=$(mktemp -d /tmp/honggfuzz-libunwind.XXXXXX)
+  pushd "$LIBUNWIND_BUILD_DIR" > /dev/null
+  curl -fL --retry 3 \
+      "https://github.com/libunwind/libunwind/releases/download/v${LIBUNWIND_VERSION}/libunwind-${LIBUNWIND_VERSION}.tar.gz" \
+      -o libunwind.tar.gz
+  tar -xzf libunwind.tar.gz
+  cd "libunwind-${LIBUNWIND_VERSION}"
+  CC=clang CXX=clang++ CFLAGS= CXXFLAGS= ./configure \
+      --prefix=/usr/local --libdir=/usr/local/lib \
+      --enable-static --disable-shared --disable-tests --disable-documentation
+  make -j"$(nproc)"
+  make install
+  popd > /dev/null
+  rm -rf "$LIBUNWIND_BUILD_DIR"
+  # Prefer the locally built static library over ALT's shared-only package.
+  export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  for library in unwind unwind-ptrace; do
+    test -f "/usr/local/lib/lib${library}.a"
+  done
+
+  # ALT also lacks a static BlocksRuntime archive. Build the standalone C
+  # runtime from the same libdispatch release used by c10f2, without dispatch.
+  BLOCKS_RUNTIME_VERSION=swift-5.9-RELEASE
+  BLOCKS_BUILD_DIR=$(mktemp -d /tmp/honggfuzz-blocks.XXXXXX)
+  pushd "$BLOCKS_BUILD_DIR" > /dev/null
+  curl -fL --retry 3 \
+      "https://github.com/swiftlang/swift-corelibs-libdispatch/archive/refs/tags/${BLOCKS_RUNTIME_VERSION}.tar.gz" \
+      -o blocks.tar.gz
+  tar -xzf blocks.tar.gz --strip-components=1
+  cd src/BlocksRuntime
+  clang -O2 -fPIC -I. -c data.c runtime.c
+  ar rcs /usr/local/lib/libBlocksRuntime.a data.o runtime.o
+  cp Block.h Block_private.h /usr/local/include/
+  popd > /dev/null
+  rm -rf "$BLOCKS_BUILD_DIR"
+  # BlocksRuntime has no pkg-config entry; honggfuzz adds -lBlocksRuntime itself.
+  export LDFLAGS="-L/usr/local/lib ${LDFLAGS:-}"
+fi
+
+pushd $SRC/honggfuzz > /dev/null
+make clean
+# These CFLAGs match honggfuzz's default, with the exception of -mtune to
+# improve portability and `-D_HF_LINUX_NO_BFD` to remove assembly instructions
+# from the filenames.
+sed -i 's/-Werror//g' Makefile
+CC=clang CFLAGS="-O3 -funroll-loops -D_HF_LINUX_NO_BFD -Wno-unterminated-string-initialization -Wno-error" make
+
+# libhfuzz.a will be added by CC/CXX linker directly during linking,
+# but it's defined here to satisfy the build infrastructure
+ar rcs honggfuzz.a libhfuzz/*.o libhfcommon/*.o
+popd > /dev/null
+
+if [ -f /etc/altlinux-release ]; then
+  apt-get clean
+else
+  apt-get remove -y --purge ${PACKAGES[@]}
+  apt-get autoremove -y
+fi
+echo "Done."

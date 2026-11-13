@@ -1,0 +1,221 @@
+#!/bin/bash -u
+# Copyright 2026 Fobos-NT
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+cd $OUT
+
+export FUZZ_TARGET=$1
+
+CASR_OUT_DIR=${CASR_OUT_DIR:-$OUT/casr_out}
+CASR_TIMEOUT=${CASR_TIMEOUT:-30}
+mkdir -p $CASR_OUT_DIR
+
+upload_to_dojo() {
+  if [[ -z "${DD_URL:-}" || -z "${DD_TOKEN:-}" || -z "${DD_PRODUCT:-}" ]]; then
+    return 0
+  fi
+
+  echo "Uploading results to DefectDojo at $DD_URL for product $DD_PRODUCT..."
+  echo '[product]' > dojo.toml
+  echo "name = \"$DD_PRODUCT\"" >> dojo.toml
+  echo '[engagement]' >> dojo.toml
+  echo "name = \"$DD_ENGAGEMENT\"" >> dojo.toml
+  echo '[test]' >> dojo.toml
+  echo 'test_type = "CASR DAST Report"' >> dojo.toml
+
+  casr-dojo -i $CASR_OUT_DIR/$FUZZ_TARGET -u $DD_URL -t $DD_TOKEN dojo.toml
+}
+
+run_casr_sydr() {
+  export ASAN_OPTIONS="$ASAN_OPTIONS:abort_on_error=1:symbolize=0:detect_odr_violation=0:"
+  export MSAN_OPTIONS="$MSAN_OPTIONS:exit_code=86:symbolize=0"
+  export UBSAN_OPTIONS="$UBSAN_OPTIONS:symbolize=0"
+
+  local config_name="${FUZZ_TARGET}-sydr.toml"
+  local config_file="$OUT/$config_name"
+
+  for dir in "$OUT"/*_build/ ; do
+    if [[ -d "$dir" && -f "${dir}${config_name}" ]]; then
+      config_file="${dir}${config_name}"
+      break
+    fi
+  done
+
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$config_name" ]]; then
+    config_file="$OUT/$SANITIZER/$config_name"
+  fi
+
+  if [[ ! -f "$config_file" ]]; then
+    echo "No sydr-fuzz config found for $FUZZ_TARGET, skipping."
+    return 0
+  fi
+
+  local config_tmp="${config_file%.*}-tmp.toml"
+  export FUZZER_OUT="${FUZZER_OUT:-$OUT/${FUZZ_TARGET}_out}"
+  export CORPUS_DIR="${CORPUS_DIR:-/tmp/${FUZZ_TARGET}_corpus}"
+  export FUZZER="${FUZZ_TARGET}"
+  mkdir -p $CORPUS_DIR
+
+  cat "$config_file" | envsubst '$FUZZER $FUZZER_OUT $CORPUS_DIR' > $config_tmp
+
+  local cmd="/sydr/sydr-fuzz -c $config_tmp casr"
+  if [[ -n "${DD_URL:-}" && -n "${DD_TOKEN:-}" && -n "${DD_PRODUCT:-}" ]]; then
+    cmd="$cmd --url $DD_URL --token $DD_TOKEN --product $DD_PRODUCT --engagement $DD_ENGAGEMENT"
+  fi
+
+  echo $cmd
+  bash -c "$cmd"
+}
+
+run_casr_libfuzzer() {
+  local binary="$OUT/$FUZZ_TARGET"
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$FUZZ_TARGET" ]]; then
+    binary="$OUT/$SANITIZER/$FUZZ_TARGET"
+  fi
+  if [[ ! -f "$binary" ]]; then
+    binary="$OUT/${FUZZING_ENGINE}_${SANITIZER}_build/${FUZZ_TARGET}"
+    if [[ ! -f "$binary" ]]; then
+      echo "Could not find compiled fuzz target ${FUZZ_TARGET}"
+      exit 1
+    fi
+  fi
+
+  if [[ ! -d "$CRASHES_DIR" || -z "$(ls -A $CRASHES_DIR 2>/dev/null)" ]]; then
+    echo "No crashes for $FUZZ_TARGET in $CRASHES_DIR, skipping."
+    return 0
+  fi
+
+  local out_dir="$CASR_OUT_DIR/$FUZZ_TARGET"
+  local log_file="$CASR_OUT_DIR/${FUZZ_TARGET}.log"
+  mkdir -p $CASR_OUT_DIR
+
+  local casr_cmd="casr-libfuzzer"
+  case "${FUZZING_ENGINE:-libfuzzer}" in
+    afl|afl++)
+      casr_cmd="casr-afl"
+      ;;
+  esac
+
+  echo "Analyzing crashes for $FUZZ_TARGET with $casr_cmd..."
+  $casr_cmd -t $CASR_TIMEOUT --force-remove -i "$CRASHES_DIR" -o "$out_dir" -- $binary \
+      > "$log_file" 2>&1 || true
+
+  upload_to_dojo "$FUZZ_TARGET"
+}
+
+
+if [[ $FUZZING_LANGUAGE == "python" || $FUZZING_LANGUAGE == "jvm" || $FUZZING_LANGUAGE == "javascript" ]]; then
+  # Interpreted languages are not compiled into binaries, so casr-libfuzzer
+  # cannot work directly with them. We call the appropriate CASR tool.
+
+  casr_cmd="casr-python"
+  case "${FUZZING_LANGUAGE}" in
+    jvm)
+      casr_cmd="casr-java"
+      ;;
+    javascript)
+      casr_cmd="casr-js"
+      ;;
+  esac
+
+  if ! command -v "$casr_cmd" >/dev/null 2>&1; then
+    echo "Error: $casr_cmd not found in PATH" >&2
+    exit 1
+  fi
+
+  if ! command -v casr-cluster >/dev/null 2>&1; then
+    echo "Error: casr-cluster not found in PATH" >&2
+    exit 1
+  fi
+
+  binary="$OUT/$FUZZ_TARGET"
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$FUZZ_TARGET" ]]; then
+    binary="$OUT/$SANITIZER/$FUZZ_TARGET"
+  fi
+
+  if [[ ! -f "$binary" ]]; then
+    # Fuzzing Python, JVM and JavaScript is only supported with libFuzzer.
+    binary="$OUT/libfuzzer_${SANITIZER}_build/${FUZZ_TARGET}"
+    if [[ ! -f "$binary" ]]; then
+      echo "Could not find compiled fuzz target ${FUZZ_TARGET}" >&2
+      exit 1
+    fi
+  fi
+
+  # Output directories
+  mkdir -p "$CASR_OUT_DIR/${FUZZ_TARGET}"
+
+  casr_out_raw="$CASR_OUT_DIR/${FUZZ_TARGET}_raw"
+  mkdir -p "$casr_out_raw"
+
+  casr_out="$CASR_OUT_DIR/${FUZZ_TARGET}"
+
+  # ---- Step 1: process every crash and preserve its testcase ----
+  for crash_path in "${CRASHES_DIR}"/*; do
+    # Handle an empty crash directory.
+    [[ -f "$crash_path" ]] || continue
+
+    crash_name="${crash_path##*/}"
+
+    echo "[casr] $FUZZ_TARGET :: $crash_name"
+
+    # Copy the original testcase to the output directory.
+    if ! cp -f -- "$crash_path" "$casr_out/$crash_name"; then
+      echo "Error: failed to copy testcase $crash_path" >&2
+      exit 1
+    fi
+
+    # Generate the CASR report.
+    if ! "$casr_cmd" \
+      -o "$casr_out_raw/${crash_name}.casrep" \
+      -- "$binary" "$crash_path"; then
+      echo "Warning: failed to generate CASR report for $crash_name" >&2
+    fi
+  done
+
+  # ---- Step 2: deduplicate crashes ----
+  casr-cluster -d "$casr_out_raw"
+
+  # ---- Step 3: cluster crashes ----
+  crashes_number=$(find "$casr_out_raw" -maxdepth 1 -type f -name '*.casrep' | wc -l)
+
+  if [[ "$crashes_number" -eq 1 ]]; then
+    echo "Only one crash found after deduplication. Nothing to cluster"
+    cp -f "$casr_out_raw"/*.casrep "$casr_out/"
+  elif [[ "$crashes_number" -gt 1 ]]; then
+    casr-cluster -c "$casr_out_raw" "$casr_out"
+  else
+    echo "No CASR reports generated for $FUZZ_TARGET"
+  fi
+
+  # Remove temporary reports. Testcases are stored separately and preserved.
+  rm -rf -- "$casr_out_raw"
+
+  # Upload reports to DefectDojo.
+  upload_to_dojo "$FUZZ_TARGET"
+else
+  if [[ "${FUZZING_ENGINE:-libfuzzer}" = sydr-fuzz ]]; then
+    run_casr_sydr "$FUZZ_TARGET"
+  else
+    run_casr_libfuzzer "$FUZZ_TARGET"
+  fi
+fi
+
+wait
+
+find $OUT -type d -exec chmod a+rwx {} +
+find $OUT -type f -exec chmod a+rw {} +
+
+echo "CASR analysis completed. Reports are in $CASR_OUT_DIR."

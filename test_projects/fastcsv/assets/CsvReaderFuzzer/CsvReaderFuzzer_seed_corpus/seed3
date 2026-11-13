@@ -1,0 +1,10 @@
+a,,,
+x
+col1,col2,col3,col4
+1,2,3,4
+only_one
+"
+""
+,,
+,,
+no_trailing_newline

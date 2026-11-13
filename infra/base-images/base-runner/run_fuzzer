@@ -1,0 +1,600 @@
+#!/bin/bash -eu
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+################################################################################
+
+# Modified by fuzz-manager from original OSS-Fuzz source.
+
+# Fuzzer runner. Appends .options arguments and seed corpus to users args.
+# Usage: $0 <fuzzer_name> <fuzzer_args>
+
+# Ordinary containers cannot change this host-wide kernel setting.
+if ! sysctl -w vm.mmap_rnd_bits=28; then
+  echo "WARNING: Cannot set vm.mmap_rnd_bits inside this container; keeping the host setting." >&2
+fi
+
+export PATH=$OUT:$PATH
+cd $OUT
+
+DEBUGGER=${DEBUGGER:-}
+
+export FUZZER=$1
+shift
+
+# This env var is set by CIFuzz. CIFuzz fills this directory with the corpus
+# from ClusterFuzz.
+CORPUS_DIR=${CORPUS_DIR:-}
+if [[ -z "$CORPUS_DIR" ]]; then
+  CORPUS_DIR="/tmp/${FUZZER}_corpus"
+  mkdir -p $CORPUS_DIR
+fi
+
+export CORPUS_DIR
+
+if [[ "$CLEAN" == "True" ]]; then
+  rm -rf "$CORPUS_DIR"
+fi
+mkdir -p "$CORPUS_DIR"
+
+# Copy accumulated corpus from /corpus/<fuzzer> into CORPUS_DIR (supplement existing)
+if [[ -d "/corpus/${FUZZER}" ]]; then
+  echo "Merging accumulated corpus from /corpus/${FUZZER} into ${CORPUS_DIR}..."
+  mkdir -p "$CORPUS_DIR"
+  cp -an "/corpus/${FUZZER}/." "$CORPUS_DIR/" 2>/dev/null || true
+fi
+
+SANITIZER=${SANITIZER:-}
+if [ -z $SANITIZER ]; then
+  # If $SANITIZER is not specified (e.g. calling from `reproduce` command), it
+  # is not important and can be set to any value.
+  SANITIZER="default"
+fi
+
+if [[ "$RUN_FUZZER_MODE" = interactive ]]; then
+  FUZZER_OUT="$OUT/${FUZZER}_out"
+else
+  FUZZER_OUT="/tmp/${FUZZER}_out"
+fi
+
+# Determine the path to the binary: first, search the subdirectory for the sanitizer name, 
+# then the root directory.
+FUZZER_BINARY="$OUT/$FUZZER"
+if [[ "$FUZZING_ENGINE" = "sydr-fuzz" ]]; then
+  echo "skip binary check for sydr-fuzz. There are following builds:"
+elif [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$FUZZER" ]]; then
+  FUZZER_BINARY="$OUT/$SANITIZER/$FUZZER"
+  echo "Using fuzzer binary from: $FUZZER_BINARY"
+elif [[ ! -f "$FUZZER_BINARY" ]]; then
+  echo "Error: Fuzzer binary not found: $FUZZER_BINARY"
+  exit 1
+fi
+
+# Artifact directories located at the same level as $OUT:
+#   /out       - build artifacts
+#   /corpus    - accumulated fuzzing corpus
+#   /crashes   - crash artifacts
+#
+# /corpus and /crashes are expected to be mounted as separate container
+# volumes. This script creates only the per-target subdirectories.
+OUT_PARENT="$(dirname "$OUT")"
+
+CORPUS_OUT_DIR="${CORPUS_OUT_DIR:-$OUT_PARENT/corpus/$FUZZER}"
+CRASHES_OUT_DIR="${CRASHES_OUT_DIR:-$OUT_PARENT/crashes/$FUZZER}"
+
+mkdir -p "$CORPUS_OUT_DIR"
+mkdir -p "$CRASHES_OUT_DIR"
+
+export CORPUS_OUT_DIR
+export CRASHES_OUT_DIR
+
+copy_artifacts() {
+  echo "Copying artifacts for $FUZZER..."
+
+  # Copy accumulated corpus (common to all engines)
+  if [[ -d "$CORPUS_DIR" ]] && [[ -n "$(ls -A "$CORPUS_DIR" 2>/dev/null)" ]]; then
+    cp -a "$CORPUS_DIR"/* "$CORPUS_OUT_DIR"/ 2>/dev/null || true
+  fi
+
+  # Copy engine-specific corpus and crashes
+  if [[ "$FUZZING_ENGINE" = "libfuzzer" ]]; then
+    # libfuzzer writes runtime corpus files to FUZZER_OUT root
+    if [[ -d "$FUZZER_OUT" ]] && [[ -n "$(ls -A "$FUZZER_OUT" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT"/* "$CORPUS_OUT_DIR"/ 2>/dev/null || true
+    fi
+    # Crashes written to $FUZZER_OUT/crashes/ via -artifact_prefix
+    if [[ -d "$FUZZER_OUT/crashes" ]] && [[ -n "$(ls -A "$FUZZER_OUT/crashes" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT/crashes"/* "$CRASHES_OUT_DIR"/ 2>/dev/null || true
+    fi
+  elif [[ "$FUZZING_ENGINE" = "afl" ]]; then
+    # AFL++ discovered inputs
+    if [[ -d "$FUZZER_OUT/default/queue" ]] && [[ -n "$(ls -A "$FUZZER_OUT/default/queue" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT/default/queue"/* "$CORPUS_OUT_DIR"/ 2>/dev/null || true
+    fi
+    # AFL++ crashes
+    if [[ -d "$FUZZER_OUT/default/crashes" ]] && [[ -n "$(ls -A "$FUZZER_OUT/default/crashes" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT/default/crashes"/* "$CRASHES_OUT_DIR"/ 2>/dev/null || true
+    fi
+  elif [[ "$FUZZING_ENGINE" = "centipede" ]]; then
+    # Centipede crashes
+    if [[ -n "${CENTIPEDE_WORKDIR:-}" && -d "$CENTIPEDE_WORKDIR/crashes" ]] && [[ -n "$(ls -A "$CENTIPEDE_WORKDIR/crashes" 2>/dev/null)" ]]; then
+      cp -a "$CENTIPEDE_WORKDIR/crashes"/* "$CRASHES_OUT_DIR"/ 2>/dev/null || true
+    fi
+  elif [[ "$FUZZING_ENGINE" = "sydr-fuzz" ]]; then
+    # Sydr-fuzz corpus
+    if [[ -d "$FUZZER_OUT/corpus" ]] && [[ -n "$(ls -A "$FUZZER_OUT/corpus" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT/corpus"/* "$CORPUS_OUT_DIR"/ 2>/dev/null || true
+    fi
+    # Sydr-fuzz crashes
+    if [[ -d "$FUZZER_OUT/crashes" ]] && [[ -n "$(ls -A "$FUZZER_OUT/crashes" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT/crashes"/* "$CRASHES_OUT_DIR"/ 2>/dev/null || true
+    fi
+  elif [[ "$FUZZING_ENGINE" = "honggfuzz" ]]; then
+    # Honggfuzz writes crashes to its working directory
+    if [[ -d "$FUZZER_OUT" ]] && [[ -n "$(ls -A "$FUZZER_OUT" 2>/dev/null)" ]]; then
+      cp -a "$FUZZER_OUT"/* "$CRASHES_OUT_DIR"/ 2>/dev/null || true
+    fi
+  fi
+
+  echo "Corpus copied to: $CORPUS_OUT_DIR"
+  echo "Crashes copied to: $CRASHES_OUT_DIR"
+}
+
+function get_dictionary() {
+  # Look for the dictionary first in the subdirectory with the sanitizer, then in the root
+  local dict_path=""
+  local options_file="$FUZZER.options"
+  local dict_file="$FUZZER.dict"
+  
+  # Check in the sanitizer subdirectory
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" ]]; then
+    if [[ -f "$OUT/$SANITIZER/$options_file" ]]; then
+      options_file="$OUT/$SANITIZER/$options_file"
+    fi
+    if [[ -f "$OUT/$SANITIZER/$dict_file" ]]; then
+      dict_file="$OUT/$SANITIZER/$dict_file"
+    fi
+  fi
+  
+  local dict=""
+  if [[ -f "$options_file" ]]; then
+    dict=$(sed -n 's/^\s*dict\s*=\s*\(.*\)/\1/p' "$options_file" | tail -1)
+  fi
+  if [[ -z "$dict" && -f "$dict_file" ]]; then
+    dict="$dict_file"
+  fi
+  [[ -z "$dict" ]] && return
+  if [[ "$FUZZING_ENGINE" = "libfuzzer" ]]; then
+     printf -- "-dict=%s" "$dict"
+  elif [[ "$FUZZING_ENGINE" = "afl" ]]; then
+     printf -- "-x %s" "$dict"
+  elif [[ "$FUZZING_ENGINE" = "honggfuzz" ]]; then
+     printf -- "--dict %s" "$dict"
+  elif [[ "$FUZZING_ENGINE" = "centipede" ]]; then
+     printf -- "--dictionary %s" "$dict"
+  else
+     printf "Unexpected FUZZING_ENGINE: $FUZZING_ENGINE, ignoring\n" >&2
+  fi
+}
+
+function get_extra_binaries() {
+  [[ "$FUZZING_ENGINE" != "centipede" ]] && return
+
+  # Для Centipede ищем дополнительные бинарники в поддиректории
+  extra_binaries=""
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" ]]; then
+    extra_binaries="$OUT/$SANITIZER/__centipede_${SANITIZER}/${FUZZER}"
+  else
+    extra_binaries="$OUT/__centipede_${SANITIZER}/${FUZZER}"
+  fi
+  
+  if compgen -G "$extra_binaries" >> /dev/null; then
+    printf -- "--extra_binaries %s" \""$extra_binaries\""
+  fi
+}
+
+if [[ "$CLEAN" == "True" ]]; then
+  rm -rf "$FUZZER_OUT"
+fi
+mkdir -p "$FUZZER_OUT"
+
+SEED_CORPUS="${FUZZER}_seed_corpus.zip"
+if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$SEED_CORPUS" ]]; then
+  SEED_CORPUS="$OUT/$SANITIZER/$SEED_CORPUS"
+fi
+
+# TODO: Investigate why this code block is skipped
+# by all default fuzzers in bad_build_check.
+# They all set SKIP_SEED_CORPUS=1.
+if [ -f $SEED_CORPUS ] && [ -z ${SKIP_SEED_CORPUS:-} ]; then
+  echo "Using seed corpus: $SEED_CORPUS"
+  unzip -o -d ${CORPUS_DIR}/ $SEED_CORPUS > /dev/null
+fi
+
+OPTIONS_FILE="${FUZZER}.options"
+if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/$OPTIONS_FILE" ]]; then
+  OPTIONS_FILE="$OUT/$SANITIZER/$OPTIONS_FILE"
+fi
+
+CUSTOM_LIBFUZZER_OPTIONS=""
+
+if [ -f $OPTIONS_FILE ]; then
+  custom_asan_options=$(parse_options.py $OPTIONS_FILE asan)
+  if [ ! -z $custom_asan_options ]; then
+    export ASAN_OPTIONS="$ASAN_OPTIONS:$custom_asan_options"
+  fi
+
+  custom_msan_options=$(parse_options.py $OPTIONS_FILE msan)
+  if [ ! -z $custom_msan_options ]; then
+    export MSAN_OPTIONS="$MSAN_OPTIONS:$custom_msan_options"
+  fi
+
+  custom_ubsan_options=$(parse_options.py $OPTIONS_FILE ubsan)
+  if [ ! -z $custom_ubsan_options ]; then
+    export UBSAN_OPTIONS="$UBSAN_OPTIONS:$custom_ubsan_options"
+  fi
+
+  CUSTOM_LIBFUZZER_OPTIONS=$(parse_options.py $OPTIONS_FILE libfuzzer)
+fi
+
+if [[ "$FUZZING_ENGINE" = afl ]]; then
+
+  # Set afl++ environment options.
+  export ASAN_OPTIONS="$ASAN_OPTIONS:abort_on_error=1:symbolize=0:detect_odr_violation=0:"
+  export MSAN_OPTIONS="$MSAN_OPTIONS:exit_code=86:symbolize=0"
+  export UBSAN_OPTIONS="$UBSAN_OPTIONS:symbolize=0"
+  export AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
+  export AFL_SKIP_CPUFREQ=1
+  export AFL_TRY_AFFINITY=1
+  export AFL_FAST_CAL=1
+  export AFL_CMPLOG_ONLY_NEW=1
+  export AFL_FORKSRV_INIT_TMOUT=30000
+  export AFL_IGNORE_PROBLEMS=1
+  export AFL_IGNORE_UNKNOWN_ENVS=1
+
+  # Ищем cmplog файл и словарь в поддиректории если есть
+  AFL_CMPLOG_FILE="afl_cmplog.txt"
+  AFL_DICT_FILE="afl++.dict"
+  
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" ]]; then
+    if [[ -f "$OUT/$SANITIZER/$AFL_CMPLOG_FILE" ]]; then
+      AFL_CMPLOG_FILE="$OUT/$SANITIZER/$AFL_CMPLOG_FILE"
+    fi
+    if [[ -f "$OUT/$SANITIZER/$AFL_DICT_FILE" ]]; then
+      AFL_DICT_FILE="$OUT/$SANITIZER/$AFL_DICT_FILE"
+    fi
+  fi
+
+  RUN_TIME_FLAG=""
+  if [[ ! -z ${TIMEOUT:-} ]]; then
+    RUN_TIME_FLAG="-V $TIMEOUT"
+  fi
+
+  # If $OUT/afl_cmplog.txt is present this means the target was compiled for
+  # CMPLOG. So we have to add the proper parameters to afl-fuzz.
+  test -e "$AFL_CMPLOG_FILE" && AFL_FUZZER_ARGS="$AFL_FUZZER_ARGS -c $FUZZER_BINARY"
+
+  # If $OUT/afl++.dict we load it as a dictionary for afl-fuzz.
+  test -e "$AFL_DICT_FILE" && AFL_FUZZER_ARGS="$AFL_FUZZER_ARGS -x $AFL_DICT_FILE"
+
+  # Ensure timeout is a bit larger than 1sec as some of the OSS-Fuzz fuzzers
+  # are slower than this.
+  AFL_FUZZER_ARGS="$AFL_FUZZER_ARGS -t 5000+"
+
+  # AFL expects at least 1 file in the input dir.
+  echo input > ${CORPUS_DIR}/input
+
+  CMD_LINE="$OUT/afl-fuzz $AFL_FUZZER_ARGS $RUN_TIME_FLAG -i $CORPUS_DIR -o $FUZZER_OUT $(get_dictionary) $* -- $FUZZER_BINARY"
+
+  echo afl++ setup:
+  env|grep AFL_
+  if [[ -f "$OUT/afl_options.txt" ]]; then
+    cat "$OUT/afl_options.txt"
+  fi
+
+elif [[ "$FUZZING_ENGINE" = honggfuzz ]]; then
+
+  # Honggfuzz expects at least 1 file in the input dir.
+  echo input > $CORPUS_DIR/input
+  # --exit_upon_crash: exit whith a first crash seen
+  # -V: verify crashes
+  # -R (report): save report file to this location
+  # -W (working dir): where the crashes go
+  # -v (verbose): don't use VTE UI, just stderr
+  # -z: use software-instrumentation of clang (trace-pc-guard....)
+  # -P: use persistent mode of fuzzing (i.e. LLVMFuzzerTestOneInput)
+  # -f: location of the initial (and destination) file corpus
+  # -n: number of fuzzing threads (and processes)
+  RUN_TIME_FLAG=""
+  if [[ ! -z ${TIMEOUT:-} ]]; then
+    RUN_TIME_FLAG="--run_time $TIMEOUT"
+  fi
+
+  CMD_LINE="$OUT/honggfuzz -n 1 --exit_upon_crash -V -R /tmp/${FUZZER}_honggfuzz.report -W $FUZZER_OUT -v -z -P $RUN_TIME_FLAG -f \"$CORPUS_DIR\" $(get_dictionary) $* -- \"$FUZZER_BINARY\""
+
+  if [[ $(LC_ALL=C grep -P "\x01_LIBHFUZZ_NETDRIVER_BINARY_SIGNATURE_\x02\xFF" "$FUZZER_BINARY" ) ]]; then
+    # Honggfuzz Netdriver port. This must match the port in Clusterfuzz.
+    export HFND_TCP_PORT=8666
+  fi
+elif [[ "$FUZZING_ENGINE" = centipede ]]; then
+
+  # Create the work and corpus directory for Centipede.
+  CENTIPEDE_WORKDIR="${CENTIPEDE_WORKDIR:-$OUT}"
+
+  # Centipede only saves crashes to crashes/ in workdir.
+  rm -rf $FUZZER_OUT
+
+  RUN_TIME_FLAG=""
+  if [[ ! -z ${TIMEOUT:-} ]]; then
+    RUN_TIME_FLAG="--stop_after=${TIMEOUT}s"
+  fi
+
+  # --workdir: Dir that stores corpus&features in Centipede's own format.
+  # --corpus_dir: Location of the initial (and destination) file corpus.
+  # --fork_server: Execute the target(s) via the fork server.
+  #   Run in fork mode to continue fuzzing indefinitely in case of
+  #   OOMs, timeouts, and crashes.
+  # --exit_on_crash=0: Do not exit on crash.
+  # --timeout=1200: The process that executes target binary will abort
+  #   if an input runs >= 1200s.
+  # --rss_limit_mb=0: Disable RSS limit.
+  # --address_space_limit_mb=0: No address space limit.
+  # --binary: The target binary under test without sanitizer.
+  # --extra_binary: The target binaries under test with sanitizers.
+  CMD_LINE="$OUT/centipede --workdir=$CENTIPEDE_WORKDIR --corpus_dir=\"$CORPUS_DIR\" --fork_server=1 --exit_on_crash=1 --timeout=1200 --rss_limit_mb=4096 --address_space_limit_mb=5120 $(get_dictionary) --binary=\"$FUZZER_BINARY\" $(get_extra_binaries) $*"
+
+elif [[ "$FUZZING_ENGINE" = sydr-fuzz ]]; then
+  export ASAN_OPTIONS="$ASAN_OPTIONS:abort_on_error=1:symbolize=0:detect_odr_violation=0:"
+  export MSAN_OPTIONS="$MSAN_OPTIONS:exit_code=86:symbolize=0"
+  export UBSAN_OPTIONS="$UBSAN_OPTIONS:abort_on_error=1:symbolize=0"
+
+  SYDR_CONFIG_FILE="${OUT}/${FUZZER}-sydr.toml"
+  CONFIG_NAME="${FUZZER}-sydr.toml"
+
+  for dir in "$OUT"/*_build/ ; do
+    if [[ -d "$dir" && -f "${dir}${CONFIG_NAME}" ]]; then
+      SYDR_CONFIG_FILE="${dir}${CONFIG_NAME}"
+      echo "Found sydr-fuzz config in sydr-fuzz build directory: $SYDR_CONFIG_FILE"
+      break
+    fi
+  done
+
+  if [[ -n "$SANITIZER" && "$SANITIZER" != "default" && -f "$OUT/$SANITIZER/${FUZZER}-sydr.toml" ]]; then
+    SYDR_CONFIG_FILE="$OUT/$SANITIZER/${FUZZER}-sydr.toml"
+  fi
+
+  SYDR_CONFIG_TMP="${SYDR_CONFIG_FILE%.*}-tmp.toml"
+
+  if [[ -f "$SYDR_CONFIG_FILE" ]]; then
+    # Config found — just substitute variables as before
+    cat "$SYDR_CONFIG_FILE" \
+      | envsubst '$FUZZER $FUZZER_OUT $CORPUS_DIR $WORKERS_NUM' > "$SYDR_CONFIG_TMP"
+  else
+    echo "No sydr-fuzz config found, generating a new one with 'sydr-fuzz init'"
+
+    rm -f "$SYDR_CONFIG_TMP" "${SYDR_CONFIG_TMP}.post"
+
+
+    # ---- Collect builds, grouped by engine ----
+    declare -A ENGINE_PRIMARY=()     # engine -> primary build dir
+    declare -A ENGINE_SECONDARY=()   # engine -> space-separated extra build dirs
+    ENGINE_ORDER=()                  # order of first discovery
+
+    for dir in "$OUT"/*_build/ ; do
+      [[ -d "$dir" ]] || continue
+      dir_name="$(basename "${dir%/}")"
+      [[ "$dir_name" == *_build ]] || continue
+      base="${dir_name%_build}"          # <engine>_<sanitizer>
+      engine="${base%_*}"                # <engine>
+      sanitizer="${base##*_}"            # <sanitizer>
+
+      binary="${dir}${FUZZER}"
+      if [[ ! -f "$binary" ]]; then
+        echo "WARNING: skipping $engine ($sanitizer) build: no binary at $binary" >&2
+        continue
+      fi
+
+      if [[ -z "${ENGINE_PRIMARY[$engine]:-}" ]]; then
+        ENGINE_PRIMARY[$engine]="$dir"
+        ENGINE_ORDER+=( "$engine" )
+      elif [[ "$sanitizer" == "none" ]]; then
+        # Promote the "none" build to primary, demote previous primary
+        ENGINE_SECONDARY[$engine]="${ENGINE_PRIMARY[$engine]:-} ${ENGINE_SECONDARY[$engine]:-}"
+        ENGINE_PRIMARY[$engine]="$dir"
+      else
+        ENGINE_SECONDARY[$engine]="${ENGINE_SECONDARY[$engine]:-} $dir"
+      fi
+    done
+
+    NUM_ENGINES=${#ENGINE_ORDER[@]}
+    if (( NUM_ENGINES == 0 )); then
+      echo "ERROR: no fuzzing engine builds found in $OUT, cannot generate sydr-fuzz config" >&2
+      exit 1
+    fi
+
+    # ---- Build init args: one entry per engine ----
+    INIT_ARGS=()
+    for engine in "${ENGINE_ORDER[@]}"; do
+      dir="${ENGINE_PRIMARY[$engine]}"
+      binary="${dir}${FUZZER}"
+      case "$engine" in
+        sydr-fuzz) init_flag="--sydr" ;;
+        *)         init_flag="--${engine}" ;;
+      esac
+      INIT_ARGS+=( "$init_flag" "$binary" )
+    done
+
+    echo "Generating sydr-fuzz config: ${INIT_ARGS[*]}"
+    /sydr/sydr-fuzz -c "$SYDR_CONFIG_TMP" init -c "$CORPUS_DIR" "${INIT_ARGS[@]}"
+
+    # ---- Extra afl builds (if any) ----
+    AFL_SECONDARIES=""
+    for engine in "${ENGINE_ORDER[@]}"; do
+      if [[ "$engine" == "afl" || "$engine" == "aflplusplus" ]]; then
+        AFL_SECONDARIES="${ENGINE_SECONDARY[$engine]:-}"
+        break
+      fi
+    done
+    USE_AFL_ARRAY=0
+    [[ -n "$AFL_SECONDARIES" ]] && USE_AFL_ARRAY=1
+
+    # ---- Workers per engine ----
+    WORKERS_PER_ENGINE=$(( ${WORKERS_NUM:-1} / NUM_ENGINES ))
+    (( WORKERS_PER_ENGINE < 1 )) && WORKERS_PER_ENGINE=1
+    echo "Distributing workers: $WORKERS_NUM total / $NUM_ENGINES engine(s) = $WORKERS_PER_ENGINE per engine"
+
+    # ---- Post-process the autogenerated config ----
+    awk -v wpe="$WORKERS_PER_ENGINE" -v afl_arr="$USE_AFL_ARRAY" '
+      BEGIN { print "out = \"$FUZZER_OUT\""; print "" }
+
+      # 1) drop exit-on-time
+      /^[[:space:]]*exit-on-time[[:space:]]*=/ { next }
+
+      # 2) section headers: convert [aflplusplus] -> [[aflplusplus]] if needed
+      /^\[/ {
+        if ($0 ~ /^\[\[?afl(plusplus)?\]\]?/) {
+          section = "afl"
+          if (afl_arr == "1") print "[[aflplusplus]]"; else print
+        } else {
+          section = ""
+          print
+        }
+        next
+      }
+
+      # 3) afl target: strip trailing " @@" and inject `path`
+      section == "afl" && /^[[:space:]]*target[[:space:]]*=/ {
+        sub(/ @@"/, " -\"")
+        print
+        match($0, /"[^"]+"/)
+        tpath = substr($0, RSTART + 1, RLENGTH - 2)
+        n = split(tpath, parts, "/")
+        dir = ""
+        for (i = 1; i < n; i++) dir = dir parts[i] "/"
+        print "path = \"" dir "\""
+        next
+      }
+
+      # 4) jobs = N
+      /^[[:space:]]*jobs[[:space:]]*=/ {
+        sub(/=.*/, "= " wpe); print; next
+      }
+
+      # 5) -jobs=N / -workers=N inside args
+      /^[[:space:]]*args[[:space:]]*=/ {
+        gsub(/-jobs=[0-9]+/,    "-jobs="    wpe)
+        gsub(/-workers=[0-9]+/, "-workers=" wpe)
+        print; next
+      }
+
+      { print }
+    ' "$SYDR_CONFIG_TMP" > "${SYDR_CONFIG_TMP}.post"
+
+    # ---- Append secondary afl tables ----
+    if [[ -n "$AFL_SECONDARIES" ]]; then
+      for dir in $AFL_SECONDARIES; do
+        {
+          echo ""
+          echo "[[aflplusplus]]"
+          echo "target = \"${dir}${FUZZER} -\""
+          echo "args = \"-i \$CORPUS_DIR\""
+          echo "jobs = 1"
+        } >> "${SYDR_CONFIG_TMP}.post"
+      done
+    fi
+
+    cat "${SYDR_CONFIG_TMP}.post" \
+      | envsubst '$FUZZER $FUZZER_OUT $CORPUS_DIR $WORKERS_NUM' > "$SYDR_CONFIG_TMP"
+    rm -f "${SYDR_CONFIG_TMP}.post"
+  fi
+
+  # ---- Extract seed corpus ----
+  if [[ -z ${SKIP_SEED_CORPUS:-} ]]; then
+    SEED_CORPUS_NAME="${FUZZER}_seed_corpus.zip"
+    for dir in "$OUT"/*_build/ ; do
+      [[ -d "$dir" ]] || continue
+      SEED_CORPUS="${dir}${SEED_CORPUS_NAME}"
+      if [[ -f "$SEED_CORPUS" ]]; then
+        echo "Using seed corpus: $SEED_CORPUS"
+        mkdir -p "$CORPUS_DIR"
+        unzip -o -d "${CORPUS_DIR}/" "$SEED_CORPUS" > /dev/null
+        break
+      fi
+    done
+  fi
+
+  CMD_LINE="/sydr/sydr-fuzz -l minimal -c $SYDR_CONFIG_TMP run"
+  if [[ ! -z ${TIMEOUT:-} ]]; then
+    CMD_LINE="timeout --preserve-status -s SIGINT ${TIMEOUT}s $CMD_LINE"
+  fi
+
+  if [ "${CMIN}" = "True" ]; then
+    CMD_LINE="$CMD_LINE && /sydr/sydr-fuzz -l minimal -c $SYDR_CONFIG_TMP cmin && rm -rf ${FUZZER_OUT}/corpus-old"
+  fi
+
+else
+
+  CMD_LINE="$FUZZER_BINARY $FUZZER_ARGS $*"
+
+  # Write crash artifacts to a known directory for easy collection.
+  mkdir -p "$FUZZER_OUT/crashes"
+  CMD_LINE="$CMD_LINE -artifact_prefix=$FUZZER_OUT/crashes/"
+
+  if [[ ! -z ${TIMEOUT:-} ]]; then
+    CMD_LINE="$CMD_LINE -max_total_time=$TIMEOUT"
+  fi
+
+  if [[ ! -z ${CUSTOM_LIBFUZZER_OPTIONS} ]]; then
+    CMD_LINE="$CMD_LINE $CUSTOM_LIBFUZZER_OPTIONS"
+  fi
+
+  if [[ ! "$CMD_LINE" =~ "-dict=" ]]; then
+    if [ -f "$FUZZER.dict" ]; then
+      CMD_LINE="$CMD_LINE -dict=$FUZZER.dict"
+    fi
+  fi
+
+  if [[ "$WORKERS_NUM" -gt 1 ]]; then
+    CMD_LINE="$CMD_LINE -workers=$WORKERS_NUM"
+  fi
+
+  if [ -z ${SKIP_SEED_CORPUS:-} ]; then
+    CMD_LINE="$CMD_LINE $FUZZER_OUT $CORPUS_DIR"
+  fi
+
+  CMD_LINE="$CMD_LINE < /dev/null"
+
+fi
+
+echo $CMD_LINE
+
+# Unset OUT so the fuzz target can't rely on it.
+unset OUT
+
+if [ ! -z "$DEBUGGER" ]; then
+  CMD_LINE="$DEBUGGER $CMD_LINE"
+fi
+
+# Do not abort this script on a fuzzer crash, timeout, or OOM:
+# accumulated corpus and crashes must still be copied after the iteration.
+FUZZER_EXIT_CODE=0
+bash -c "$CMD_LINE" || FUZZER_EXIT_CODE=$?
+
+find "$FUZZER_OUT" -type d -exec chmod a+rwx {} + 2>/dev/null || true
+find "$FUZZER_OUT" -type f -exec chmod a+rw {} + 2>/dev/null || true
+
+# Copy accumulated corpus and crashes after every fuzzing iteration.
+copy_artifacts
+
+exit "$FUZZER_EXIT_CODE"
