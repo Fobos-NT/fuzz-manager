@@ -25,8 +25,8 @@ FROM ${BASE_REGISTRY}/base-image:${BASE_TAG} as temp-runner-binary-builder
 
 RUN apt-get update && \
     if [ -f /etc/altlinux-release ]; then \
-        apt-get install -y libyaml-devel gcc gcc-c++ make curl; \
-    else apt-get install -y libyaml-dev build-essential curl; fi
+        apt-get install -y libyaml-devel gcc gcc-c++ make curl lcov; \
+    else apt-get install -y libyaml-dev build-essential curl lcov; fi
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 
 # Set the PATH environment variable to include the cargo binaries

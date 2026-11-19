@@ -68,8 +68,6 @@ ln -s $(pwd)/fuzz-manager/infra/helper.py /usr/local/bin/fuzz-manager
 Для того чтобы настроить URL вашего репозитория Nexus, необходимо переопределить  константы, которые начинаются с `REPOSITORY_`, в начале файла [`fuzz-manager/infra/helper.py`](infra/helper.py):
 
 ```python
-# Nexus url address
-REPOSITORY_BASE_URL = "http://10.10.10.10:8080"
 # Nexus repository name to work with
 REPOSITORY_NAME = "fuzzing_test"
 # Tree structure to use inside of repository to save and download artifacts
@@ -115,7 +113,7 @@ fuzz-manager build_fuzzers fuzz-manager/test_projects/json-parser
 fuzz-manager build_fuzzers --sanitizer=none --engine=sydr-fuzz --clean --use_separate_dir fuzz-manager/test_projects/json-parser
 
 # Сделать сборку под afl + undefined и выложить сборку на Nexus репозиторий
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager build_fuzzers --push --engine=afl --sanitizer=undefined fuzz-manager/test_projects/json-parser
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> fuzz-manager build_fuzzers --push --engine=afl --sanitizer=undefined fuzz-manager/test_projects/json-parser
 ```
 
 Стоит отметить, что для sydr-fuzz необходимо делать сразу все сборки, которые будут использоваться при фаззинге. Чтобы сделать разные сборки в директории `out`, необходимо использовать флаг `--use_separate_dir`. Например, сборки под sydr и libfuzzer + asan:
@@ -123,7 +121,7 @@ NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager b
 ```bash
 fuzz-manager build_fuzzers --sanitizer=none --engine=sydr-fuzz --use_separate_dir fuzz-manager/test_projects/json-parser
 fuzz-manager build_fuzzers --sanitizer=address --engine=libfuzzer --use_separate_dir fuzz-manager/test_projects/json-parser
-fuzz-manager build_fuzzers --use_separate_dir --engine=afl --sanitizer=none fuzz-manager/test_projects/json-parser
+fuzz-manager build_fuzzers --use_separate_dir --engine=afl --sanitizer=undefined fuzz-manager/test_projects/json-parser
 ```
 
 ### Запуск фаззинга
@@ -135,10 +133,10 @@ fuzz-manager build_fuzzers --use_separate_dir --engine=afl --sanitizer=none fuzz
 fuzz-manager run_fuzzer --timeout=100 fuzz-manager/test_projects/json-parser json_parse
 
 # Запуск конкретного фаззера в 4 потока с установкой сборки с Nexus
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager run_fuzzer --sanitizer=afl --engine=libfuzzer --pull_build --workers=4 fuzz-manager/test_projects/json-parser json_parse
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> fuzz-manager run_fuzzer --sanitizer=afl --engine=libfuzzer --pull_build --workers=4 fuzz-manager/test_projects/json-parser json_parse
 
 # Запуск фаззинга через sydr-fuzz с клонированием и последующей выгрузкой артефактов фаззинга на Nexus репозиторий
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> SYDR_PATH=<path_to_sydr-fuzz> fuzz-manager run_fuzzer --push_artifacts --pull_artifacts --engine=sydr-fuzz fuzz-manager/test_projects/json-parser json_parse
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> SYDR_PATH=<path_to_sydr-fuzz> fuzz-manager run_fuzzer --push_artifacts --pull_artifacts --engine=sydr-fuzz fuzz-manager/test_projects/json-parser json_parse
 ```
 
 ### Сбор наработанного покрытия
@@ -157,7 +155,7 @@ fuzz-manager build_fuzzers --sanitizer=coverage --engine=libfuzzer fuzz-manager/
 fuzz-manager coverage --no-corpus-download fuzz-manager/test_projects/json-parser --fuzz-target=json_parse
 
 # Сбор наработанного покрытия для json_parse цели с использованием корпуса с Nexus репозитория и выгрузкой результатов
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager coverage --push_artifacts --fuzz-target=json_parse fuzz-manager/test_projects/json-parser
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> fuzz-manager coverage --push_artifacts --fuzz-target=json_parse fuzz-manager/test_projects/json-parser
 ```
 
 ### Анализ падений с помощью casr
@@ -169,7 +167,7 @@ NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager c
 fuzz-manager casr --crash_dir=<crashes_path> --no-crashes-download --engine=libfuzzer --sanitizer=address fuzz-manager/test_projects/json-parser
 
 # Загрузить найденные падения с Nexus репозитория и выложить casr отчёты на DefectDojo
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> DD_TOKEN=<defectdojo_api_token> fuzz-manager --fuzz-target=json_parse --push_artifacts --engine=libfuzzer --sanitizer=address --dojo-url=<defectdojo_url> fuzz-manager/test_projects/json-parser
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> DD_TOKEN=<defectdojo_api_token> fuzz-manager --fuzz-target=json_parse --push_artifacts --engine=libfuzzer --sanitizer=address --dojo-url=<defectdojo_url> fuzz-manager/test_projects/json-parser
 ```
 
 ### Генерация Fuzz Introspector отчёта
@@ -178,7 +176,7 @@ Fuzz Introspector — это инструмент анализа качеств�
 
 ```bash
 # Сгенерировать отчёт fuzz introspector на наработанном покрытии с nexus
-NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> fuzz-manager introspector --public-corpora --push_artifacts fuzz-manager/test_projects/json-parser
+NEXUS_USER=<nexus_username> NEXUS_TOKEN=<nexus_username_password> REPOSITORY_BASE_URL=<nexus_base_url> fuzz-manager introspector --public-corpora --push_artifacts fuzz-manager/test_projects/json-parser
 ```
 
 Сгенерированный отчёт Fuzz Introspector находится в директории `fuzz-manager/test_projects/json-parser/out/introspector-report`
