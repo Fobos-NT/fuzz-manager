@@ -51,6 +51,11 @@ build_base_image() {
             esac
         fi
     fi
+    if [[ "$PUSH_IMAGES" == 1 ]]; then
+        output_args=(--push
+            --cache-to "type=registry,ref=${GHCR_REGISTRY}/${image_name}:${cache_tag}"
+            --cache-from "type=registry,ref=${GHCR_REGISTRY}/${image_name}:${cache_tag}")
+    fi
 
     echo "========================================"
     echo "Building ${image_name}:${variant}"
@@ -66,7 +71,7 @@ build_base_image() {
 
     echo "========================================"
     echo "Successfully built ${image_name}:${variant}"
-    echo "GHCR:   ${GHCR_REGISTRY}/${image_name}:${variant}"
+    echo "GHCR: ${GHCR_REGISTRY}/${image_name}:${variant}"
     echo "========================================"
     echo
 }

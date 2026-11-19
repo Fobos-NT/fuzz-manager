@@ -67,6 +67,8 @@ run_casr_sydr() {
   export CORPUS_DIR="${CORPUS_DIR:-/tmp/${FUZZ_TARGET}_corpus}"
   export FUZZER="${FUZZ_TARGET}"
   mkdir -p $CORPUS_DIR
+  # afl++ input dir must not be empty
+  echo 1 > $CORPUS_DIR/seed1
 
   cat "$config_file" | envsubst '$FUZZER $FUZZER_OUT $CORPUS_DIR' > $config_tmp
 

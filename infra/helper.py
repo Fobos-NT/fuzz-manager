@@ -23,6 +23,7 @@ projects/fuzzers, running them etc."""
 from __future__ import print_function
 from multiprocessing.dummy import Pool as ThreadPool
 import argparse
+import json
 import logging
 import os
 import re
@@ -35,35 +36,33 @@ import constants
 import templates
 # import pipeline_scheduler
 
-# Nexus url address
-REPOSITORY_BASE_URL = "http://10.10.10.10:8080"
 # Nexus repository name to work with
 REPOSITORY_NAME = "fuzzing_test"
 # Tree structure to use inside of repository to save and download artifacts
 REPOSITORY_PROJECT_PATH = "/fuzzing/{project}/"
 
 # Template url for downloading artifacts for a project
-REPOSITORY_DOWNLOAD_URL_TEMPLATE = f"{REPOSITORY_BASE_URL}/repository/{REPOSITORY_NAME}/{REPOSITORY_PROJECT_PATH}/" + "{archive_filename}"
+REPOSITORY_DOWNLOAD_URL_TEMPLATE = f"/repository/{REPOSITORY_NAME}/{REPOSITORY_PROJECT_PATH}/" + "{archive_filename}"
 
 # Template url for uploading artifacts for a project
-REPOSITORY_UPLOAD_URL = f"{REPOSITORY_BASE_URL}/service/rest/v1/components?repository={REPOSITORY_NAME}"
+REPOSITORY_UPLOAD_URL = f"/service/rest/v1/components?repository={REPOSITORY_NAME}"
 
 def _download_archive(project_name: str, archive_filename: str, output_file: str) -> bool:
     """
     download archive_filename from Nexus repository for project_name and save it to output_file
     """
-
-    download_url = REPOSITORY_DOWNLOAD_URL_TEMPLATE.format(
-        project=project_name,
-        archive_filename=archive_filename,
-    )
-
     cmd = ["wget", "-O", output_file]
 
     # get NEXUS_USER and NEXUS_TOKEN environment variables
-    user, password = _get_artifact_repository_user()
-    if user == None or password==None:
+    user, password, repo_base_url = _get_artifact_repository_config()
+    if user == None or password==None or repo_base_url == None:
       return False
+
+    download_url = repo_base_url.rstrip("/") + REPOSITORY_DOWNLOAD_URL_TEMPLATE.format(
+        project=project_name,
+        archive_filename=archive_filename,
+    )
+    
     cmd += ["--user", user, "--password", password, download_url]
 
     try:
@@ -84,17 +83,19 @@ def _upload_archive(project_name: str, archive_path: str, archive_filename: str)
     """
 
     # get NEXUS_USER and NEXUS_TOKEN environment variables
-    user, password = _get_artifact_repository_user()
-    if user == None or password==None:
+    user, password, repo_base_url = _get_artifact_repository_config()
+    if user == None or password==None or repo_base_url == None:
       return False
     auth = ["-u", f"{user}:{password}"]
+
+    upload_url = repo_base_url.rstrip("/") + REPOSITORY_UPLOAD_URL
 
     cmd = [
         "curl", *auth,
         "-F", f"raw.directory={REPOSITORY_PROJECT_PATH.format(project=project_name)}",
         "-F", f"raw.asset1=@{archive_path}",
         "-F", f"raw.asset1.filename={archive_filename}",
-        "-X", "POST", REPOSITORY_UPLOAD_URL,
+        "-X", "POST", upload_url,
     ]
 
     try:
@@ -336,7 +337,7 @@ def main():  # pylint: disable=too-many-branches,too-many-return-statements
 
   # Need to do this before chdir.
   # TODO(https://github.com/google/oss-fuzz/issues/6758): Get rid of chdir.
-  if hasattr(args, 'testcase_path'):
+  if getattr(args, 'testcase_path', None):
     args.testcase_path = _get_absolute_path(args.testcase_path)
   # Note: this has to happen after parse_args above as parse_args needs to know
   # the original CWD for external projects.
@@ -503,7 +504,7 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   build_fuzzers_parser.add_argument('--push',
                                     action='store_true',
                                     help='Push build artifacts to NEXUS registry. '
-                                    'Uses NEXUS_TOKEN and NEXUS_USER environment variable')
+                                    'Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable')
 
   check_build_parser = subparsers.add_parser(
       'check_build', help='Checks that fuzzers execute without errors.')
@@ -525,12 +526,12 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                   f"Default is {BASE_RUNNER_IMAGE}")
   run_fuzzer_parser.add_argument('--timeout', help="run fuzzer for a specified period of time (is seconds)")
   run_fuzzer_parser.add_argument('--push_artifacts', help='push artifacts after fuzzing to NEXUS registry.'
-                                  ' Uses NEXUS_TOKEN and NEXUS_USER environment variable',
+                                  ' Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable',
                                   action='store_true')
   run_fuzzer_parser.add_argument('--artifacts_tag', help="add tag to artifacts archive. Usefull to save results for long fuzzing compaign")
   run_fuzzer_parser.add_argument('--no_cmin', help="do not cmin corpus directory after fuzzing", action='store_true')
-  run_fuzzer_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN and NEXUS_USER environment variables", action='store_true')
-  run_fuzzer_parser.add_argument('--pull_artifacts', help="pull previous artifacts from NEXUS repository. Uses NEXUS_TOKEN and NEXUS_USER environment variables", action='store_true')
+  run_fuzzer_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable", action='store_true')
+  run_fuzzer_parser.add_argument('--pull_artifacts', help="pull previous artifacts from NEXUS repository. Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable", action='store_true')
   run_fuzzer_parser.add_argument('--clean',
                                   dest='clean',
                                   action='store_true',
@@ -564,7 +565,7 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                help='specify location of corpus'
                                ' to be used (requires --fuzz-target argument)')
   coverage_parser.add_argument('--push_artifacts', help='push coverage report to NEXUS registry.'
-                                  ' Uses NEXUS_TOKEN and NEXUS_USER environment variable',
+                                  ' Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable',
                                   action='store_true')
   coverage_parser.add_argument('--artifacts_tag', help="add tag to artifacts archive. Usefull to save results for long fuzzing compaign")
   _add_engine_args(coverage_parser)
@@ -574,7 +575,7 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                help='additional arguments to '
                                'pass to llvm-cov utility.',
                                nargs='*')
-  coverage_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN and NEXUS_USER environment variable", action='store_true')
+  coverage_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable", action='store_true')
   coverage_parser.add_argument('--run_img', 
                                  help="runtime docker image to use (must inherit"
                                        f"from base-runner). Default is {BASE_RUNNER_IMAGE}")
@@ -585,9 +586,9 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
                                  help=f"runtime docker image to use (must inherit"
                                        "from base-runner). Default is {BASE_RUNNER_IMAGE}")
   casr_parser.add_argument('--crash_dir', help="input directory with founded crashes")
-  casr_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN and NEXUS_USER environment variable", action='store_true')
+  casr_parser.add_argument('--pull_build', help="pull build artifacts from NEXUS repository. Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable", action='store_true')
   casr_parser.add_argument('--push_artifacts', help='push casr reports to NEXUS registry.'
-                                  ' Uses NEXUS_TOKEN and NEXUS_USER environment variable',
+                                  ' Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable',
                                   action='store_true')
   casr_parser.add_argument('--no-crashes-download',
                                action='store_true',
@@ -637,7 +638,7 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
       default=False,
       action='store_true')
   introspector_parser.add_argument('--push_artifacts', help='push introspector report to NEXUS registry.'
-                                  ' Uses NEXUS_TOKEN and NEXUS_USER environment variable',
+                                  ' Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable',
                                   action='store_true')
 
   download_artifacts_parser = subparsers.add_parser(
@@ -655,10 +656,25 @@ def get_parser():  # pylint: disable=too-many-statements,too-many-locals
   reproduce_parser.add_argument('project',
                                 help='name of the project or path (external)')
   reproduce_parser.add_argument('fuzzer_name', help='name of the fuzzer')
-  reproduce_parser.add_argument('testcase_path', help='path of local testcase')
+  reproduce_parser.add_argument('testcase_path',
+                                help='path of local testcase (the crash is '
+                                'downloaded here when --finding-id is used)')
+  reproduce_parser.add_argument('--finding-id', type=int,
+                                help='download the crash attached to this finding')
+  reproduce_parser.add_argument('--dojo-url', help='DefectDojo instance URL')
+  reproduce_parser.add_argument('--dojo-token',
+                                help='DefectDojo API token (default: DD_TOKEN)')
+  reproduce_parser.add_argument('--run-img',
+                                help='runner image, including any required runtime dependencies')
+  reproduce_parser.add_argument('--pull_build',
+                                help="pull build artifacts from NEXUS repository. "
+                                     "Uses NEXUS_TOKEN, NEXUS_USER and REPOSITORY_BASE_URL environment variable",
+                                action='store_true')
   reproduce_parser.add_argument('fuzzer_args',
                                 help='arguments to pass to the fuzzer',
                                 nargs='*')
+  _add_engine_args(reproduce_parser)
+  _add_sanitizer_args(reproduce_parser)
   _add_environment_args(reproduce_parser)
   _add_architecture_args(reproduce_parser)
 
@@ -700,12 +716,13 @@ def check_project_exists(project):
   return False
 
 
-def _check_fuzzer_exists(project, fuzzer_name, architecture='x86_64'):
+def _check_fuzzer_exists(project, fuzzer_name, architecture='x86_64',
+                         image_name=None):
   """Checks if a fuzzer exists."""
   platform = 'linux/arm64' if architecture == 'aarch64' else 'linux/amd64'
   command = ['docker', 'run', '--rm', '--platform', platform, '--entrypoint', '']
   command.extend(['-v', '%s:/out' % project.out])
-  command.append(BASE_RUNNER_IMAGE)
+  command.append(image_name or BASE_RUNNER_IMAGE)
 
   command.extend(['/bin/bash', '-c', 'test -f /out/%s' % fuzzer_name])
 
@@ -1228,23 +1245,28 @@ def _get_fuzz_targets(project):
   return fuzz_targets
 
 
-def _get_artifact_repository_user():
-  """Returns username and password from environment variables.
-  Now we only support Nexus storage"""
+def _get_artifact_repository_config():
+  """Returns username, password and repository url from environment variables."""
 
   nexus_user = os.getenv("NEXUS_USER")
   if nexus_user == None:
     logger.error('Can not push/pull artifacts to Nexus repository without Nexus user. '
                  'Set NEXUS_USER environment variable')
-    return None, None
+    return None, None, None
 
   nexus_token = os.getenv("NEXUS_TOKEN")
   if nexus_token == None:
     logger.error('Can not push/pull artifacts to Nexus repository without api token. '
                  'Set NEXUS_TOKEN environment variable')
-    return None, None
+    return None, None, None
   
-  return nexus_user, nexus_token
+  nexus_url = os.getenv("REPOSITORY_BASE_URL")
+  if nexus_url == None:
+    logger.error('Can not push/pull artifacts to Nexus repository without nexus url. '
+                 'Set REPOSITORY_BASE_URL environment variable')
+    return None, None, None
+  
+  return nexus_user, nexus_token, nexus_url
 
 def _get_artifacts_archive(project, artifacts_name, target_dir=None):
     """Downloads artifacts from Nexus repository"""
@@ -1574,9 +1596,10 @@ def _casr_target(args, project, engine, sanitizer, use_sydr, fuzz_target):
     if not crash_dir and not args.no_crashes_download:
       if not _get_artifacts_archive(project, f"{fuzz_target}_crashes",
                                     f"crashes/{fuzz_target}"):
-        logger.warning('No crashes downloaded for %s, skipping.', fuzz_target)
+        logger.error('No crashes downloaded for %s.', fuzz_target)
         return True
-      crash_dir = os.path.join(project.path, "crashes", fuzz_target)
+
+    crash_dir = os.path.join(project.path, "crashes", fuzz_target)
 
   if not crash_dir or not os.path.exists(crash_dir) or not os.listdir(crash_dir):
     logger.info('No crashes found for %s, skipping.', fuzz_target)
@@ -1958,10 +1981,106 @@ def run_fuzzer(args):
 
   return True
 
+class DefectDojoError(Exception):
+  pass
+
+
+def _curl_json(url, token):
+  """GET JSON from DefectDojo API via curl."""
+  cmd = [
+      'curl', '-sf',
+      '-H', 'Authorization: Token ' + token,
+      url,
+  ]
+  result = subprocess.run(cmd, capture_output=True, text=True)
+  if result.returncode != 0:
+    raise DefectDojoError(
+        'DefectDojo request failed: %s' % result.stderr.strip())
+  try:
+    return json.loads(result.stdout)
+  except (ValueError, UnicodeDecodeError):
+    raise DefectDojoError('Invalid JSON from DefectDojo') from None
+
+
+def _curl_download(url, token, destination):
+  """Download a file from DefectDojo API via curl."""
+  os.makedirs(os.path.dirname(destination), exist_ok=True)
+  cmd = [
+      'curl', '-sf',
+      '-H', 'Authorization: Token ' + token,
+      '-o', destination,
+      url,
+  ]
+  result = subprocess.run(cmd, capture_output=True, text=True)
+  if result.returncode != 0:
+    if os.path.exists(destination):
+      os.unlink(destination)
+    raise DefectDojoError(
+        'DefectDojo download failed: %s' % result.stderr.strip())
+
+
+def download_crash(url, token, finding_id, testcase_path):
+  """Downloads the "Crash seed" attachment of DefectDojo finding |finding_id|
+  to |testcase_path|."""
+  api = url.rstrip('/') + '/api/v2/findings/%d' % finding_id
+
+  # 1. Get attachments list
+  payload = _curl_json(api + '/files/', token)
+  if not isinstance(payload, dict) or not isinstance(payload.get('files'), list):
+    raise DefectDojoError('Invalid DefectDojo attachment list')
+  attachments = payload['files']
+  candidates = [
+      item for item in attachments
+      if (item.get('title') or '').startswith('Crash seed')
+  ]
+  if len(candidates) != 1:
+    raise DefectDojoError(
+        'Expected exactly one "Crash seed" attachment; found: ' + str(len(candidates)))
+
+  file_id = candidates[0]['id']
+
+  # 2. Download the crash file
+  _curl_download(api + '/files/download/%d/' % file_id, token, testcase_path)
+
 def reproduce(args):
   """Reproduces a specific test case from a specific project."""
-  return reproduce_impl(args.project, args.fuzzer_name, args.valgrind, args.e,
-                        args.fuzzer_args, args.testcase_path, args.architecture)
+  if not check_project_exists(args.project):
+    return False
+
+  if args.finding_id is not None:
+    if not args.dojo_url:
+      logger.error('--finding-id requires --dojo-url')
+      return False
+    dd_token = args.dojo_token or os.getenv('DD_TOKEN')
+    if not dd_token:
+      logger.error('--finding-id requires --dojo-token or DD_TOKEN')
+      return False
+    try:
+      download_crash(args.dojo_url, dd_token, args.finding_id,
+                     args.testcase_path)
+    except (DefectDojoError, OSError) as error:
+      logger.error('Cannot download DefectDojo crash: %s', error)
+      return False
+    logger.info('Downloaded crash to %s', args.testcase_path)
+
+  if args.pull_build:
+    project = args.project
+    engine = project.fuzzing_engine or args.engine or constants.DEFAULT_ENGINE
+    sanitizer = args.sanitizer or constants.DEFAULT_SANITIZER
+    if not pull_build_artifacts(project,
+                                engine + '_' + sanitizer + '_build'):
+      return False
+
+  return reproduce_impl(
+      args.project,
+      args.fuzzer_name,
+      args.valgrind,
+      args.e,
+      args.fuzzer_args,
+      args.testcase_path,
+      args.architecture,
+      image_name=args.run_img,
+  )
 
 
 def reproduce_impl(  # pylint: disable=too-many-arguments
@@ -1973,23 +2092,30 @@ def reproduce_impl(  # pylint: disable=too-many-arguments
     testcase_path,
     architecture='x86_64',
     run_function=docker_run,
-    err_result=False):
+    err_result=False,
+    image_name=None):
   """Reproduces a testcase in the container."""
   if not check_project_exists(project):
     return err_result
 
-  if not _check_fuzzer_exists(project, fuzzer_name, architecture):
+  if not testcase_path or not os.path.isfile(testcase_path):
+    logger.error('Testcase is not a regular file: %s', testcase_path)
+    return err_result
+
+  image_name = image_name or _get_base_runner_image(
+      argparse.Namespace(project=project), debug=valgrind)
+  if not _check_fuzzer_exists(project, fuzzer_name, architecture, image_name):
     return err_result
 
   debugger = ''
-  env = ['HELPER=True', 'ARCHITECTURE=' + architecture]
-  image_name = 'base-runner'
+  env = ['HELPER=True', 'ARCHITECTURE=' + architecture,
+         'CLEAN=False', 'WORKERS_NUM=1']
+  _get_project_build_subdir(project.out, fuzzer_name + '_out')
 
   if valgrind:
     debugger = 'valgrind --tool=memcheck --track-origins=yes --leak-check=full'
 
   if debugger:
-    image_name = 'base-runner-debug'
     env += ['DEBUGGER=' + debugger]
 
   if env_to_add:
@@ -1999,9 +2125,9 @@ def reproduce_impl(  # pylint: disable=too-many-arguments
       '-v',
       '%s:/out' % project.out,
       '-v',
-      '%s:/testcase' % _get_absolute_path(testcase_path),
+      '%s:/testcase:ro' % _get_absolute_path(testcase_path),
       '-t',
-      'gcr.io/oss-fuzz-base/%s' % image_name,
+      image_name,
       'reproduce',
       fuzzer_name,
       '-runs=100',
