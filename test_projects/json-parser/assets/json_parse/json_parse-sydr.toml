@@ -15,6 +15,22 @@ cmin = false
     ASAN_OPTIONS = "symbolize=0"
     MSAN_OPTIONS = "exit_code=86,symbolize=0"
 
+[[aflplusplus]]
+target = "/out/afl_address_build/json_parse -"
+args = "-x /out/afl_none_build/json_parse.dict -i /out/afl_none_build/json_parse_seed_corpus"
+jobs = 1
+[aflplusplus.env]
+    ASAN_OPTIONS = "symbolize=0"
+    MSAN_OPTIONS = "exit_code=86,symbolize=0"
+
+[[aflplusplus]]
+target = "/out/afl_undefined_build/json_parse -"
+args = "-x /out/afl_undefined_build/json_parse.dict -i /out/afl_undefined_build/json_parse_seed_corpus"
+jobs = 1
+[aflplusplus.env]
+    ASAN_OPTIONS = "symbolize=0"
+    MSAN_OPTIONS = "exit_code=86,symbolize=0"
+
 
 [libfuzzer]
 path = "/out/libfuzzer_address_build/json_parse"

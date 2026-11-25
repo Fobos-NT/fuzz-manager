@@ -1082,16 +1082,16 @@ def build_fuzzers_impl(  # pylint: disable=too-many-arguments,too-many-locals,to
 
   if build_project_image and not build_image_impl(project,
                                                    architecture=architecture,
-                                                   tag=build_image_name):
+                                                   tag=image_name):
       return False
     # do not build image but pull latest image
   elif not build_project_image:
-    if not docker_pull(build_image_name):
-      if not docker_image_exists(build_image_name):
+    if not docker_pull(image_name):
+      if not docker_image_exists(image_name):
         logger.error('Image %s: pull failed and image not found locally.',
-                       build_image_name)
+                       image_name)
         return False
-      logger.info('Pull failed, using existing local image %s.', build_image_name)
+      logger.info('Pull failed, using existing local image %s.', image_name)
 
   project_out = os.path.join(project.out, child_dir)
     # if sanitizer == "introspector":

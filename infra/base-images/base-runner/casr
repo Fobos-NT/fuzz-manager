@@ -173,12 +173,6 @@ if [[ $FUZZING_LANGUAGE == "python" || $FUZZING_LANGUAGE == "jvm" || $FUZZING_LA
 
     echo "[casr] $FUZZ_TARGET :: $crash_name"
 
-    # Copy the original testcase to the output directory.
-    if ! cp -f -- "$crash_path" "$casr_out/$crash_name"; then
-      echo "Error: failed to copy testcase $crash_path" >&2
-      exit 1
-    fi
-
     # Generate the CASR report.
     if ! "$casr_cmd" \
       -o "$casr_out_raw/${crash_name}.casrep" \
@@ -195,12 +189,21 @@ if [[ $FUZZING_LANGUAGE == "python" || $FUZZING_LANGUAGE == "jvm" || $FUZZING_LA
 
   if [[ "$crashes_number" -eq 1 ]]; then
     echo "Only one crash found after deduplication. Nothing to cluster"
-    cp -f "$casr_out_raw"/*.casrep "$casr_out/"
+    mkdir -p "$casr_out/cl1"
+   cp -f "$casr_out_raw"/*.casrep "$casr_out/cl1/"
   elif [[ "$crashes_number" -gt 1 ]]; then
     casr-cluster -c "$casr_out_raw" "$casr_out"
   else
     echo "No CASR reports generated for $FUZZ_TARGET"
   fi
+
+  find "$casr_out" -mindepth 2 -type f -name '*.casrep' \
+   -exec sh -c '
+    report="$1"
+    testcase="${report##*/}"
+    testcase="${testcase%.casrep}"
+    cp -f -- "$2/$testcase" "${report%/*}/"
+   ' _ {} "${CRASHES_DIR}" \;
 
   # Remove temporary reports. Testcases are stored separately and preserved.
   rm -rf -- "$casr_out_raw"
