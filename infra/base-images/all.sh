@@ -23,6 +23,7 @@ ALT_P11_IMAGE="${ALT_P11_IMAGE:-registry.altlinux.org/p11/alt:20261014}"
 # Each variant builds the complete dependency-ordered image matrix.
 BASE_VARIANTS="${BASE_VARIANTS:-latest alt-c10f2 alt-p11}"
 PUSH_IMAGES="${PUSH_IMAGES:-0}"
+BASE_IMAGES="${BASE_IMAGES:-}" # Space-separated list; empty means all images.
 
 # Все дополнительные аргументы, переданные скрипту.
 # Например:
@@ -89,6 +90,7 @@ for variant in $BASE_VARIANTS; do
             base-builder-jvm base-builder-python base-builder-rust
             base-builder-ruby base-builder-swift base-runner base-runner-debug)
     for image in "${images[@]}"; do
+        [[ -z "$BASE_IMAGES" || " $BASE_IMAGES " == *" $image "* ]] || continue
         build_base_image "$image" "infra/base-images/${image}" "$variant"
     done
 done
