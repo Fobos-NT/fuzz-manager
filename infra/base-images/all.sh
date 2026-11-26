@@ -62,7 +62,7 @@ build_base_image() {
     echo "Building ${image_name}:${variant}"
     echo "========================================"
 
-    docker buildx build \
+    docker buildx build -q \
         -f "${dockerfile}" \
         -t "${GHCR_REGISTRY}/${image_name}:${variant}" \
         "${output_args[@]}" \
