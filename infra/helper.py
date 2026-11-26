@@ -1333,10 +1333,6 @@ def download_artifacts(args, artifacts_name="corpus"):
   return all(thread_pool.map(_download_for_single_target, fuzz_targets))
 
 def pull_build_artifacts(project, artifacts_dir):
-  user, password = _get_artifact_repository_user()
-  if user == None or password==None:
-    return False
-
   try:
     _get_artifacts_archive(project, artifacts_dir)
     return True
