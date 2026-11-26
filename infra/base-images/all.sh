@@ -21,7 +21,7 @@ GHCR_REGISTRY="${GHCR_REGISTRY:-ghcr.io/fobos-nt/fuzz-manager}"
 ALT_C10F2_IMAGE="${ALT_C10F2_IMAGE:-registry.altlinux.org/c10f/alt:20261014}"
 ALT_P11_IMAGE="${ALT_P11_IMAGE:-registry.altlinux.org/p11/alt:20261014}"
 # Each variant builds the complete dependency-ordered image matrix.
-BASE_VARIANTS="${BASE_VARIANTS:-latest alt-c10f2 alt-p11}"
+BASE_VARIANTS="${BASE_VARIANTS:-latest alt-c10f2 alt-p11 ubuntu-24-04}"
 PUSH_IMAGES="${PUSH_IMAGES:-0}"
 BASE_IMAGES="${BASE_IMAGES:-}" # Space-separated list; empty means all images.
 
@@ -80,7 +80,7 @@ build_base_image() {
 # Validate the complete selection before building or publishing anything.
 for variant in $BASE_VARIANTS; do
     case "$variant" in
-        latest|alt-c10f2|alt-p11) ;;
+        latest|alt-c10f2|alt-p11|ubuntu-24-04) ;;
         *) echo "Unsupported base variant: ${variant}" >&2; exit 1 ;;
     esac
 done
